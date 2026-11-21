@@ -9,13 +9,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
     - uses: actions/setup-go@v5
       with:
-        go-version-file: go.mod
+        go-version: '1.26.x'
+        cache: false
     - run: go test -race ./... && go vet ./...
+    - name: Bash syntax, shellcheck and failure-path tests
+      run: |
+        for file in scripts/*.sh; do bash -n "$file"; done
+        shellcheck scripts/*.sh
+        bash scripts/test-shell.sh
     - name: Released CRD and core Kubernetes schemas
-      shell: pwsh
-      run: ./scripts/check-manifests.ps1
+      run: bash scripts/check-manifests.sh
     - run: docker build -t cpu-backend:check .
     - name: Secret scan (local process, no external scan service)
       run: |

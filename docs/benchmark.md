@@ -12,6 +12,9 @@ The execution identity had Contributor, without advertised
 groups were deleted and verified; no benchmark measurements were collected.
 The deployment script now checks that permission **before** billable creation,
 documents its limits, and supports policy-compliant Entra authentication.
+A subsequent environment was checked **read-only**: the needed role-assignment
+permission and one provider/preview registration were still missing, so no new
+billable deployment was attempted. The operational sample is now Bash/Linux-first.
 
 Local unit/HTTP-harness tests use synthetic fixtures and are **not evidence of
 Azure gateway redistribution**. GitHub CI passed Go race tests, vet, Linux
@@ -22,7 +25,7 @@ raw Azure diagnostic output are published.
 
 ## A/B methodology
 
-`scripts/benchmark.ps1` applies `round-robin` and `load-aware` to the **same Service**.
+`scripts/benchmark.sh` applies `round-robin` and `load-aware` to the **same Service**.
 Do not split traffic between Services or change placement, replicas, request work,
 concurrency, CPU limits or VM SKUs between phases. Verify policy acceptance at its
 current generation. Keep autoscaling off.
@@ -46,15 +49,15 @@ RPS uses actual elapsed time. Client/network saturation can mask capacity differ
 Start one bounded CPU worker on the smaller node **before the full A/B run**, and
 keep it through both modes and all trials. Use a second terminal:
 
-```powershell
-$env:KUBECONFIG = Join-Path $PWD 'out\demo.kubeconfig'
-$node = kubectl get nodes -l agentpool=small -o jsonpath='{.items[0].metadata.name}'
-$pod = kubectl get pods -n cpu-aware --field-selector "spec.nodeName=$node" -l app=cpu-backend -o jsonpath='{.items[0].metadata.name}'
+```bash
+export KUBECONFIG="$PWD/out/demo.kubeconfig"
+node="$(kubectl get nodes -l agentpool=small -o jsonpath='{.items[0].metadata.name}')"
+pod="$(kubectl get pods -n cpu-aware --field-selector "spec.nodeName=$node" -l app=cpu-backend -o jsonpath='{.items[0].metadata.name}')"
 # 1 real CPU worker, hard-stops after 20 minutes; never a public HTTP control.
-kubectl exec -n cpu-aware $pod -- /backend -burn 1200 -workers 1
+kubectl exec -n cpu-aware "$pod" -- /backend -burn 1200 -workers 1
 ```
 
-Run `scripts/benchmark.ps1` in the first terminal (defaults ~15 minutes).
+Run `bash scripts/benchmark.sh` in the first terminal (defaults ~15 minutes).
 This is **actual computation on the node**, not synthetic telemetry. It competes
 with the backend and demonstrates the unrelated-workload caveat. Record worker
 count alongside results. Do not compare phases after the worker expires.

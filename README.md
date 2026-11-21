@@ -26,14 +26,15 @@ instantaneous least-CPU scheduler**, and no particular traffic split is guarante
   effective `Microsoft.Authorization/roleAssignments/write` at the subscription
   parent before creating billable resources. This is not a guarantee: conditional
   roles, deny assignments, policy, PIM activation and propagation can still fail.
-- PowerShell **7+**, current Azure CLI with `aks-preview` and `alb` extensions,
-  `kubectl`; **Go 1.26+** for the benchmark. Docker is unnecessary: ACR builds
-  the backend. Sign in with `az login`; never commit credentials.
+- **Linux + Bash 4+**, current Azure CLI with `aks-preview` and `alb` extensions,
+  `jq`, `kubectl` and `kubelogin`; **Go 1.26+** for the benchmark. Docker is
+  unnecessary: ACR builds the backend. Azure Cloud Shell Bash or an authenticated
+  Linux/WSL terminal works. Sign in with `az login`; never commit credentials.
 - Supported region, available non-burstable Linux VM SKUs, quota for 14 vCPUs
-  (allow upgrade headroom). Defaults: **East US**, two D4s_v5 system nodes,
+  (allow upgrade headroom). Defaults: **West US 2**, two D4s_v5 system nodes,
   D2s_v5 + D4s_v5 user nodes. Change SKUs to examine the customer's hardware.
 - A **currently supported stable AKS version >=1.32** in that region.
-  Run `az aks get-versions --location eastus -o table` and choose the exact patch.
+  Run `az aks get-versions --location westus2 -o table` and choose the exact patch.
   Do not choose an unsupported version merely because it meets the minimum.
 - Managed ALB/Gateway API add-ons are **preview**. Requires **ALB Controller
   >=1.10.21**, the release introducing load-aware routing. Managed versions are
@@ -43,64 +44,73 @@ instantaneous least-CPU scheduler**, and no particular traffic split is guarante
 
 **Costs:** four VMs + disks, AKS outbound networking, ACR Basic, and Application
 Gateway for Containers (resource, association, frontend and capacity).
-No existing clusters are changed. A small two-hour East US demo is estimated at
-**$3–5** with build/network allowance, not a guaranteed cap; check current
+No existing clusters are changed. A small two-hour West US demo is estimated at
+**$4–6** with build/network allowance, not a guaranteed cap; check current
 [pricing](https://learn.microsoft.com/azure/application-gateway/for-containers/understanding-pricing).
 Resources bill until deleted. Use a dedicated group, set a timer, and clean up
 even when deployment or benchmarking fails.
 
-## Deploy (PowerShell 7)
+## Deploy (Bash + Azure CLI)
 
 Clone this repository and enter it. Choose your subscription locally; never commit
 its ID/name, generated manifests, tokens or kubeconfig.
 
-```powershell
-$sub = '<your authorized subscription>'
-$rg = 'cpu-lb-demo-' + (Get-Date -Format 'MMddHHmmss')
-$acr = 'cpulbdemo' + (Get-Random -Minimum 100000 -Maximum 999999)
-$version = '<exact supported AKS patch from get-versions>'
-az account set --subscription $sub
+```bash
+export SUBSCRIPTION='<your authorized subscription>'
+export RESOURCE_GROUP="cpu-lb-demo-$(date +%Y%m%d%H%M%S)"
+export REGISTRY="cpulbdemo$(openssl rand -hex 4)"
+export LOCATION=westus2
+export KUBERNETES_VERSION='<exact supported AKS patch from get-versions>'
+az account set --subscription "$SUBSCRIPTION"
 az extension add --name aks-preview --upgrade
 az extension add --name alb --upgrade
-foreach ($provider in @('Microsoft.ContainerService','Microsoft.Network','Microsoft.NetworkFunction','Microsoft.ServiceNetworking','Microsoft.Compute','Microsoft.ContainerRegistry')) {
-    az provider register --namespace $provider --wait
-}
-foreach ($feature in @('ManagedGatewayAPIPreview','ApplicationLoadBalancerPreview')) {
-    az feature register --namespace Microsoft.ContainerService --name $feature
-}
-# Wait for BOTH features to reach Registered before continuing.
-az feature show --namespace Microsoft.ContainerService --name ManagedGatewayAPIPreview --query properties.state -o tsv
-az feature show --namespace Microsoft.ContainerService --name ApplicationLoadBalancerPreview --query properties.state -o tsv
-az provider register --namespace Microsoft.ContainerService --wait
+# Install kubectl/kubelogin if missing; put their install directory on PATH.
+# az aks install-cli
 
-.\scripts\deploy.ps1 -Subscription $sub -ResourceGroup $rg -Registry $acr `
-    -KubernetesVersion $version -EnableEntra -ConfirmCosts
+# FIRST inspect provider/preview states. Only register after approval for THIS
+# subscription: these are shared subscription settings, not disposable resources.
+for provider in Microsoft.ContainerService Microsoft.Network Microsoft.NetworkFunction \
+  Microsoft.ServiceNetworking Microsoft.Compute Microsoft.ContainerRegistry; do
+  az provider show --subscription "$SUBSCRIPTION" --namespace "$provider" \
+    --query registrationState -o tsv
+done
+for feature in ManagedGatewayAPIPreview ApplicationLoadBalancerPreview; do
+  az feature show --subscription "$SUBSCRIPTION" --namespace Microsoft.ContainerService \
+    --name "$feature" --query properties.state -o tsv
+done
+# If approved and missing: az provider register --subscription "$SUBSCRIPTION" --namespace <provider> --wait
+# If approved and missing: az feature register --subscription "$SUBSCRIPTION" --namespace Microsoft.ContainerService --name <feature>
+# Wait for both previews to be Registered, then re-register ContainerService:
+# az provider register --subscription "$SUBSCRIPTION" --namespace Microsoft.ContainerService --wait
+
+bash scripts/deploy.sh --preflight-only
+bash scripts/deploy.sh --confirm-costs
 ```
 
 Allow 15–30 minutes. The script builds/pushes the container, creates a new cluster
 with **Azure CNI and AKS-managed VNet**, enables OIDC/workload identity and managed
 Gateway API/ALB add-ons, adds two labeled/tainted user pools, and installs the
 backend + gateway + policy. It refuses to reuse an existing group.
-To check credentials/advertised permissions and prerequisites without provisioning,
-use the same parameters with `-PreflightOnly` **instead of** `-ConfirmCosts`.
+`--preflight-only` is read-only and checks tools, advertised role permissions,
+registered providers/features and tenant context. It does **not** prove quota,
+SKU availability or policy compliance. Deployment never registers shared settings
+automatically. ARM operations explicitly target `SUBSCRIPTION`.
 Networking is deliberately simple: no BYO VNet, peering, firewall or overlay.
 The add-on creates a delegated `aks-appgateway` subnet and its managed
 identity/role assignments in the node resource group. Do not customize that
 identity or its `kube-system` namespace.
-Override `-Location`, `-SystemSku`, `-SmallSku` and `-LargeSku` for your regional
+Override `LOCATION`, `SYSTEM_SKU`, `SMALL_SKU` and `LARGE_SKU` for your regional
 availability/quota; use non-burstable SKUs and keep the two backend SKUs different.
 The system pool uses two nodes with at least four vCPUs each, per
 [AKS system-pool requirements](https://learn.microsoft.com/azure/aks/use-system-pools).
-`-EnableEntra` enables Microsoft Entra authentication/Azure RBAC, disables local
+Deployment enables Microsoft Entra authentication/Azure RBAC, disables local
 accounts and grants the signed-in user cluster-admin on **only the new cluster**.
-Install `kubelogin` first (for example, `az aks install-cli`); RBAC propagation can
-take several minutes. Some subscriptions require Entra authentication by policy.
-Never bypass that policy with exemption tags. Omit the flag only in disposable
-environments explicitly allowing local certificate-based administration.
+RBAC propagation can take several minutes. Some subscriptions require Entra by
+policy; never bypass policy with exemption tags.
 
 Role assignments needed by this path: **AcrPull** for the kubelet identity on the
 new ACR (`--attach-acr`); **Azure Kubernetes Service RBAC Cluster Admin** for the
-signed-in user on the new AKS cluster (`-EnableEntra`); and add-on-managed
+signed-in user on the new AKS cluster; and add-on-managed
 **Network Contributor**, **AppGw for Containers Configuration Manager**, and
 **Reader** for its managed identity in the node resource group. The latter are
 created by the managed add-on, not hand-written by this script. Fixing ACR access
@@ -121,14 +131,14 @@ show `version` and flattened target references).
 
 ## Verify, then benchmark
 
-```powershell
-$env:KUBECONFIG = Join-Path $PWD 'out\demo.kubeconfig'
+```bash
+export KUBECONFIG="$PWD/out/demo.kubeconfig"
 kubectl get nodes -L node.kubernetes.io/instance-type,cpu-aware-demo
 kubectl top nodes
 kubectl get pods -n cpu-aware -o wide
 kubectl get endpointslices -n cpu-aware -l kubernetes.io/service-name=backend
 kubectl get gateway,httproute,backendloadbalancingpolicy -n cpu-aware -o yaml
-.\scripts\benchmark.ps1
+bash scripts/benchmark.sh
 ```
 
 Require Gateway `Programmed=True`, HTTPRoute `Accepted=True`/`ResolvedRefs=True`,
@@ -139,10 +149,12 @@ diagnostic; the backend reads NodeMetrics directly.
 Benchmarking switches the **same native policy** between round robin and load-aware,
 alternates order across three repetitions, discards 60 seconds warmup per phase,
 and measures 90 seconds at 32 concurrent closed-loop clients. It restores
-load-aware in `finally`. JSON reports per-node/SKU shares, distinct **real** node
+load-aware with an exit trap. JSON reports per-node/SKU shares, distinct **real** node
 CPU samples, throughput, p50/p95 latency, errors and ORCA emission. Anonymous
 summaries go under ignored `results/`; no gateway addresses, tokens, resource IDs
 or raw node names. Defaults run about 15 minutes.
+Override `REPETITIONS=3`, `SECONDS_PER_PHASE=90` and `CONCURRENCY=32` as environment
+variables; use identical settings for both modes.
 
 [Benchmark interpretation, controlled CPU perturbation, and validation status](docs/benchmark.md).
 Without sustained traffic or a capacity/load difference, near-equal shares are
@@ -188,14 +200,16 @@ delegation and identity roles. Health probes inherit `/healthz` from pod readine
 Delete **only your newly created group**; AKS deletes its managed node group too.
 Wait and verify both groups are gone. Do not target shared groups.
 
-```powershell
-$mc = az aks show --subscription $sub -g $rg -n cpu-demo --query nodeResourceGroup -o tsv
-az group delete --subscription $sub --name $rg --yes
-az group exists --subscription $sub --name $rg
-az group exists --subscription $sub --name $mc
-Remove-Item Env:KUBECONFIG -ErrorAction SilentlyContinue
-Remove-Item .\out\demo.kubeconfig -ErrorAction SilentlyContinue
+```bash
+# Keep SUBSCRIPTION, RESOURCE_GROUP and LOCATION from deployment; never use shared groups.
+bash scripts/cleanup.sh --confirm-delete
+unset KUBECONFIG
 ```
+
+Cleanup checks the sample safety tag, verifies group/managed-group deletion and
+removes only the generated kubeconfig. It does **not** unregister providers or
+preview features. Set a deployment/benchmark time limit and run cleanup on failure
+as well as success; stopping a client process alone does not stop Azure billing.
 
 ## Local checks and sources
 
@@ -204,10 +218,12 @@ telemetry, elapsed rolling rates, errors, auth, token rotation and benchmark
 aggregation/anonymization. CI builds the Linux container and runs Gitleaks.
 No Azure credentials are needed. [Schema validator](scripts/validate-manifests.cjs)
 checks Microsoft released CRDs; cluster dry-run/status checks remain mandatory.
-Run `.\scripts\check-manifests.ps1` with Node.js/npm and Go installed for the
+Run `bash scripts/check-manifests.sh` with Node.js/npm and Go installed for the
 repeatable local schema check (downloads a digest-verified CRD layer from the
 1.10.40 Microsoft installer image and local validators). It checks field names,
 required fields and types, but does not evaluate Kubernetes CEL/controller rules.
+`shellcheck scripts/*.sh` and `bash scripts/test-shell.sh` cover real Bash
+quoting/syntax and non-mutating permission/preview/cost/cleanup failure fixtures.
 
 - [Native load-aware / ORCA](https://learn.microsoft.com/azure/application-gateway/for-containers/load-balancing-strategies)
 - [Add-on prerequisites, identity and subnet](https://learn.microsoft.com/azure/application-gateway/for-containers/quickstart-deploy-application-gateway-for-containers-alb-controller-addon)
