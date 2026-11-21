@@ -22,6 +22,10 @@ instantaneous least-CPU scheduler**, and no particular traffic split is guarante
   and role assignments (Contributor plus Role Based Access Control Administrator
   at the deployment scope, or equivalent). Provider/preview registration needs
   subscription permissions. Cluster-admin installs the sample's read-only RBAC.
+  **Contributor alone is insufficient.** A read-only preflight checks advertised
+  effective `Microsoft.Authorization/roleAssignments/write` at the subscription
+  parent before creating billable resources. This is not a guarantee: conditional
+  roles, deny assignments, policy, PIM activation and propagation can still fail.
 - PowerShell **7+**, current Azure CLI with `aks-preview` and `alb` extensions,
   `kubectl`; **Go 1.26+** for the benchmark. Docker is unnecessary: ACR builds
   the backend. Sign in with `az login`; never commit credentials.
@@ -70,13 +74,15 @@ az feature show --namespace Microsoft.ContainerService --name ApplicationLoadBal
 az provider register --namespace Microsoft.ContainerService --wait
 
 .\scripts\deploy.ps1 -Subscription $sub -ResourceGroup $rg -Registry $acr `
-    -KubernetesVersion $version -ConfirmCosts
+    -KubernetesVersion $version -EnableEntra -ConfirmCosts
 ```
 
 Allow 15–30 minutes. The script builds/pushes the container, creates a new cluster
 with **Azure CNI and AKS-managed VNet**, enables OIDC/workload identity and managed
 Gateway API/ALB add-ons, adds two labeled/tainted user pools, and installs the
 backend + gateway + policy. It refuses to reuse an existing group.
+To check credentials/advertised permissions and prerequisites without provisioning,
+use the same parameters with `-PreflightOnly` **instead of** `-ConfirmCosts`.
 Networking is deliberately simple: no BYO VNet, peering, firewall or overlay.
 The add-on creates a delegated `aks-appgateway` subnet and its managed
 identity/role assignments in the node resource group. Do not customize that
@@ -85,6 +91,20 @@ Override `-Location`, `-SystemSku`, `-SmallSku` and `-LargeSku` for your regiona
 availability/quota; use non-burstable SKUs and keep the two backend SKUs different.
 The system pool uses two nodes with at least four vCPUs each, per
 [AKS system-pool requirements](https://learn.microsoft.com/azure/aks/use-system-pools).
+`-EnableEntra` enables Microsoft Entra authentication/Azure RBAC, disables local
+accounts and grants the signed-in user cluster-admin on **only the new cluster**.
+Install `kubelogin` first (for example, `az aks install-cli`); RBAC propagation can
+take several minutes. Some subscriptions require Entra authentication by policy.
+Never bypass that policy with exemption tags. Omit the flag only in disposable
+environments explicitly allowing local certificate-based administration.
+
+Role assignments needed by this path: **AcrPull** for the kubelet identity on the
+new ACR (`--attach-acr`); **Azure Kubernetes Service RBAC Cluster Admin** for the
+signed-in user on the new AKS cluster (`-EnableEntra`); and add-on-managed
+**Network Contributor**, **AppGw for Containers Configuration Manager**, and
+**Reader** for its managed identity in the node resource group. The latter are
+created by the managed add-on, not hand-written by this script. Fixing ACR access
+alone does not satisfy the other identity/permission requirements.
 
 Prefer no AKS add-on previews? Microsoft's
 [Helm-installed ALB Controller](https://learn.microsoft.com/azure/application-gateway/for-containers/quickstart-deploy-application-gateway-for-containers-alb-controller-helm)

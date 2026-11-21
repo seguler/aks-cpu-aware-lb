@@ -9,6 +9,8 @@ param(
     [string]$SmallSku = 'Standard_D2s_v5',
     [string]$LargeSku = 'Standard_D4s_v5',
     [string]$SystemSku = 'Standard_D4s_v5',
+    [switch]$EnableEntra,
+    [switch]$PreflightOnly,
     [switch]$ConfirmCosts
 )
 $ErrorActionPreference = 'Stop'
@@ -23,23 +25,52 @@ function kc {
     if ($LASTEXITCODE -ne 0) { throw 'kubectl command failed; inspect the resource status.' }
 }
 function Wait-Resource([string]$Resource) {
-    for ($i=0; $i -lt 60; $i++) {
+    for ($i=0; $i -lt 100; $i++) {
         & kubectl --kubeconfig (Join-Path $out 'demo.kubeconfig') get $Resource -o name 2>$null | Out-Null
         if ($LASTEXITCODE -eq 0) { return }
         Start-Sleep 3
     }
     throw "Managed add-on never published $Resource. Inspect kube-system controller pods and events."
 }
-if (-not $ConfirmCosts) { throw 'This creates billable NEW resources. Review costs and pass -ConfirmCosts.' }
+if (-not $ConfirmCosts -and -not $PreflightOnly) { throw 'This creates billable NEW resources. Review costs and pass -ConfirmCosts, or use -PreflightOnly for read-only checks.' }
 if ($SmallSku -eq $LargeSku) { throw 'Choose two different VM SKUs.' }
 if ([version]$KubernetesVersion -lt [version]'1.32.0') { throw 'Use a currently supported AKS version >=1.32.' }
 if ((azc group exists --name $ResourceGroup -o tsv).Trim() -ne 'false') {
     throw 'Resource group already exists. This script only creates a new disposable environment.'
 }
+$subscriptionId = (azc account show --query id -o tsv).Trim()
+$scope = "https://management.azure.com/subscriptions/$subscriptionId"
+$permissions = (azc rest --method get --url "$scope/providers/Microsoft.Authorization/permissions?api-version=2022-04-01" -o json) |
+    ConvertFrom-Json -Depth 30
+$action = 'Microsoft.Authorization/roleAssignments/write'
+$canAssign = @($permissions.value | Where-Object {
+    $entry = $_
+    @($entry.actions | Where-Object { $action -like $_ }).Count -gt 0 -and
+    @($entry.notActions | Where-Object { $action -like $_ }).Count -eq 0
+}).Count -gt 0
+if (-not $canAssign) {
+    throw 'Preflight: no advertised roleAssignments/write permission at the parent subscription. Contributor alone cannot attach ACR or grant cluster RBAC. Activate appropriately scoped Role Based Access Control Administrator/User Access Administrator (or equivalent), then retry. No resources were created.'
+}
+Write-Host 'Role-assignment permission is advertised; Azure Policy, deny assignments, RBAC conditions and propagation can still reject deployment.'
 foreach ($feature in @('ManagedGatewayAPIPreview', 'ApplicationLoadBalancerPreview')) {
     if ((azc feature show --namespace Microsoft.ContainerService --name $feature --query properties.state -o tsv).Trim() -ne 'Registered') {
         throw "Register $feature and wait for Registered before deploying; see README."
     }
+}
+$auth = @()
+if ($EnableEntra) {
+    if (-not (Get-Command kubelogin -ErrorAction SilentlyContinue)) { throw 'Install kubelogin before enabling Entra authentication.' }
+    $tenant = (azc account show --query tenantId -o tsv).Trim()
+    $activeTenant = (& az account show --query tenantId -o tsv --only-show-errors).Trim()
+    if ($LASTEXITCODE -ne 0 -or $activeTenant -ne $tenant) { throw 'Sign in to the tenant owning the chosen subscription first.' }
+    # Graph identity reads have no --subscription option; verify tenant context first.
+    $principal = (& az ad signed-in-user show --query id -o tsv --only-show-errors).Trim()
+    if ($LASTEXITCODE -ne 0 -or -not $principal) { throw 'Cannot identify the signed-in user for the new cluster RBAC grant.' }
+    $auth = @('--enable-aad','--enable-azure-rbac','--disable-local-accounts')
+}
+if ($PreflightOnly) {
+    Write-Host 'Read-only prerequisite checks passed; no resources created. This does not prove policy, quota, SKU availability or future role-assignment success.'
+    return
 }
 New-Item -ItemType Directory -Force $out | Out-Null
 azc group create --name $ResourceGroup --location $Location --tags sample=aks-cpu-aware-lb -o none
@@ -51,7 +82,12 @@ try {
         --node-count 2 --node-vm-size $SystemSku --node-osdisk-size 64 `
         --network-plugin azure --enable-oidc-issuer --enable-workload-identity `
         --enable-gateway-api --enable-application-load-balancer --attach-acr $Registry `
-        --generate-ssh-keys -o none
+        --generate-ssh-keys @auth -o none
+    if ($EnableEntra) {
+        $clusterId = (azc aks show -g $ResourceGroup -n cpu-demo --query id -o tsv).Trim()
+        azc role assignment create --assignee-object-id $principal --assignee-principal-type User `
+            --role 'Azure Kubernetes Service RBAC Cluster Admin' --scope $clusterId -o none
+    }
     foreach ($pool in @(@{Name='small'; SKU=$SmallSku}, @{Name='large'; SKU=$LargeSku})) {
         azc aks nodepool add --resource-group $ResourceGroup --cluster-name cpu-demo `
             --name $pool.Name --node-vm-size $pool.SKU --node-count 1 --node-osdisk-size 64 `
@@ -59,6 +95,10 @@ try {
     }
     azc aks get-credentials --resource-group $ResourceGroup --name cpu-demo `
         --file (Join-Path $out 'demo.kubeconfig') -o none
+    if ($EnableEntra) {
+        & kubelogin convert-kubeconfig --login azurecli --kubeconfig (Join-Path $out 'demo.kubeconfig')
+        if ($LASTEXITCODE -ne 0) { throw 'kubelogin configuration failed.' }
+    }
     Wait-Resource 'crd/backendloadbalancingpolicy.alb.networking.azure.io'
     kc wait --for=condition=Established crd/backendloadbalancingpolicy.alb.networking.azure.io --timeout=180s
     $crd = (kc get crd backendloadbalancingpolicy.alb.networking.azure.io -o json) | ConvertFrom-Json -Depth 100

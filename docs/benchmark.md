@@ -2,10 +2,23 @@
 
 ## Validation status
 
-**Live AKS validation is pending for this revision.** Local unit/HTTP-harness
-tests use synthetic fixtures and are **not evidence of Azure gateway
-redistribution**. Deployment and live benchmark instructions are executable.
-Do not call this sample end-to-end proven until those steps have completed.
+**Live AKS routing/benchmark validation is not complete.** Two authorized
+disposable deployment attempts built/pushed the real container through ACR.
+The first was denied by a policy requiring Microsoft Entra authentication.
+The second enabled Entra/Azure RBAC but failed the `--attach-acr` role assignment:
+`Could not create a role assignment for ACR. Are you an Owner on this subscription?`
+The execution identity had Contributor, without advertised
+`Microsoft.Authorization/roleAssignments/write`. All newly created resource
+groups were deleted and verified; no benchmark measurements were collected.
+The deployment script now checks that permission **before** billable creation,
+documents its limits, and supports policy-compliant Entra authentication.
+
+Local unit/HTTP-harness tests use synthetic fixtures and are **not evidence of
+Azure gateway redistribution**. GitHub CI passed Go race tests, vet, Linux
+container build, released-CRD/core manifest validation and a local Gitleaks scan.
+Do not call this sample end-to-end proven until live routing and the A/B run
+complete with the documented permissions. No account/resource identifiers or
+raw Azure diagnostic output are published.
 
 ## A/B methodology
 
