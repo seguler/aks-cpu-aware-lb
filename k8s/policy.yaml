@@ -1,0 +1,19 @@
+apiVersion: alb.networking.azure.io/v1
+kind: BackendLoadBalancingPolicy
+metadata:
+  name: demo
+  namespace: cpu-aware
+spec:
+  targetRefs:
+  - targetRef:
+      group: ""
+      kind: Service
+      name: backend
+    ports:
+    - port: 8080
+  loadBalancing:
+    strategy: load-aware
+    loadAware:
+      blackoutPeriod: 10s
+      metricExpirationPeriod: 30s
+      errorUtilizationPenalty: "1.0"

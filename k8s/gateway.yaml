@@ -1,0 +1,43 @@
+apiVersion: alb.networking.azure.io/v1
+kind: ApplicationLoadBalancer
+metadata:
+  name: demo
+  namespace: cpu-aware
+spec:
+  associations:
+  - ALB_SUBNET_ID
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: demo
+  namespace: cpu-aware
+  annotations:
+    alb.networking.azure.io/alb-namespace: cpu-aware
+    alb.networking.azure.io/alb-name: demo
+spec:
+  gatewayClassName: azure-alb-external
+  listeners:
+  - name: http
+    protocol: HTTP
+    port: 80
+    allowedRoutes:
+      namespaces:
+        from: Same
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: demo
+  namespace: cpu-aware
+spec:
+  parentRefs:
+  - name: demo
+  rules:
+  - matches:
+    - path:
+        type: Exact
+        value: /work
+    backendRefs:
+    - name: backend
+      port: 8080
