@@ -22,10 +22,12 @@ instantaneous least-CPU scheduler**, and no particular traffic split is guarante
   and role assignments (Contributor plus Role Based Access Control Administrator
   at the deployment scope, or equivalent). Provider/preview registration needs
   subscription permissions. Cluster-admin installs the sample's read-only RBAC.
-  **Contributor alone is insufficient.** A read-only preflight checks advertised
-  effective `Microsoft.Authorization/roleAssignments/write` at the subscription
-  parent before creating billable resources. This is not a guarantee: conditional
-  roles, deny assignments, policy, PIM activation and propagation can still fail.
+  **Contributor alone cannot create role assignments.** For this script's new ACR
+  and cluster assignments, a read-only preflight checks all pages of advertised
+  `Microsoft.Authorization/roleAssignments/write` at the subscription parent.
+  Missing advertised permission stops this unattended deployment; it is **not**
+  a demonstrated authorization denial or proof about every child scope.
+  Conditional roles, deny assignments, policy, PIM and propagation remain relevant.
 - **Linux + Bash 4+**, current Azure CLI with `aks-preview` and `alb` extensions,
   `jq`, `kubectl` and `kubelogin`; **Go 1.26+** for the benchmark. Docker is
   unnecessary: ACR builds the backend. Azure Cloud Shell Bash or an authenticated
@@ -92,7 +94,8 @@ with **Azure CNI and AKS-managed VNet**, enables OIDC/workload identity and mana
 Gateway API/ALB add-ons, adds two labeled/tainted user pools, and installs the
 backend + gateway + policy. It refuses to reuse an existing group.
 `--preflight-only` is read-only and checks tools, advertised role permissions,
-registered providers/features and tenant context. It does **not** prove quota,
+registered providers/features, valid Linux authentication and tenant/user context.
+It does **not** prove quota,
 SKU availability or policy compliance. Deployment never registers shared settings
 automatically. ARM operations explicitly target `SUBSCRIPTION`.
 Networking is deliberately simple: no BYO VNet, peering, firewall or overlay.
@@ -113,8 +116,13 @@ new ACR (`--attach-acr`); **Azure Kubernetes Service RBAC Cluster Admin** for th
 signed-in user on the new AKS cluster; and add-on-managed
 **Network Contributor**, **AppGw for Containers Configuration Manager**, and
 **Reader** for its managed identity in the node resource group. The latter are
-created by the managed add-on, not hand-written by this script. Fixing ACR access
-alone does not satisfy the other identity/permission requirements.
+created by AKS for the managed add-on, **not by the calling user**. Microsoft's
+managed-add-on quickstart does not state that its caller must personally create
+these three assignments. The user cluster-admin assignment is this sample's setup
+choice to install cluster-scoped Kubernetes RBAC, not an AGC add-on requirement.
+An existing appropriately authorized installer would not need that extra grant.
+`--attach-acr` does create a kubelet role assignment and has its own documented
+[permission prerequisites](https://learn.microsoft.com/azure/aks/cluster-container-registry-integration).
 
 Prefer no AKS add-on previews? Microsoft's
 [Helm-installed ALB Controller](https://learn.microsoft.com/azure/application-gateway/for-containers/quickstart-deploy-application-gateway-for-containers-alb-controller-helm)

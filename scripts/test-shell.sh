@@ -15,10 +15,26 @@ case "$1 $2" in
         [[ "${MOCK_MODE:-}" == unsafe-tag ]] && echo true || echo false ;;
     "group show") echo '{"tags":{"sample":"not-this-sample"}}' ;;
     "account show")
-        [[ "$*" == *"--query tenantId"* ]] && echo fixture-tenant || echo fixture-subscription ;;
+        if [[ "${MOCK_MODE:-}" == wrong-context && "$*" != *"--subscription"* ]]; then
+            echo '{"id":"other-subscription","tenantId":"other-tenant","user":{"name":"other-user"}}'
+        else
+            echo '{"id":"fixture-subscription","tenantId":"fixture-tenant","user":{"name":"fixture-user"}}'
+        fi ;;
+    "account get-access-token")
+        if [[ "${MOCK_MODE:-}" == expired-login ]]; then echo "fixture-auth-expired" >&2; exit 1; fi
+        echo fixture-tenant ;;
     "rest --method")
         if [[ "${MOCK_MODE:-}" == deny ]]; then
             echo '{"value":[{"actions":["*"],"notActions":["Microsoft.Authorization/*/Write"]}]}'
+        elif [[ "${MOCK_MODE:-}" == paginated || "${MOCK_MODE:-}" == page-failure ]]; then
+            if [[ "$*" == *"skiptoken=second"* ]]; then
+                if [[ "$MOCK_MODE" == page-failure ]]; then echo "fixture-page-read-failed" >&2; exit 1; fi
+                echo '{"value":[{"actions":["MICROSOFT.AUTHORIZATION/*"],"notActions":[]}]}'
+            else
+                echo '{"value":[{"actions":["*"],"notActions":["Microsoft.Authorization/*/Write"]}],"nextLink":"https://management.azure.com/subscriptions/fixture-subscription/providers/Microsoft.Authorization/permissions?api-version=2022-04-01&skiptoken=second"}'
+            fi
+        elif [[ "${MOCK_MODE:-}" == malformed-permissions ]]; then
+            echo '{"value":[{"actions":"*","notActions":[]}]}'
         else
             echo '{"value":[{"actions":["Microsoft.Authorization/roleAssignments/*"],"notActions":["Microsoft.Authorization/roleDefinitions/write"]}]}'
         fi ;;
@@ -45,10 +61,26 @@ expect_failure() {
 }
 export MOCK_MODE=deny
 expect_failure bash "$ROOT/scripts/deploy.sh" --preflight-only
-grep -q 'no advertised roleAssignments/write' "$temporary/stderr"
+grep -q 'NOT a demonstrated Azure authorization denial' "$temporary/stderr"
 export MOCK_MODE=allow
 bash "$ROOT/scripts/deploy.sh" --preflight-only >"$temporary/stdout"
 grep -q 'No resources created' "$temporary/stdout"
+export MOCK_MODE=paginated
+bash "$ROOT/scripts/deploy.sh" --preflight-only >"$temporary/stdout"
+grep -q 'No resources created' "$temporary/stdout"
+grep -q 'skiptoken=second' "$MOCK_CALLS"
+export MOCK_MODE=page-failure
+expect_failure bash "$ROOT/scripts/deploy.sh" --preflight-only
+grep -q 'fixture-page-read-failed' "$temporary/stderr"
+if grep -q 'Preflight did not establish roleAssignments/write' "$temporary/stderr"; then
+    echo "An incomplete permission read was incorrectly treated as negative permission evidence." >&2; exit 1
+fi
+export MOCK_MODE=malformed-permissions
+expect_failure bash "$ROOT/scripts/deploy.sh" --preflight-only
+grep -q 'evidence is incomplete' "$temporary/stderr"
+export MOCK_MODE=wrong-context
+expect_failure bash "$ROOT/scripts/deploy.sh" --preflight-only
+grep -q 'THIS Linux terminal' "$temporary/stderr"
 expect_failure bash "$ROOT/scripts/deploy.sh"
 export MOCK_MODE=missing-preview
 expect_failure bash "$ROOT/scripts/deploy.sh" --preflight-only

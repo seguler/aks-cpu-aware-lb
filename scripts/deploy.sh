@@ -48,7 +48,7 @@ on_exit() {
     local status=$?
     unset DEMO_TOKEN
     if (( status != 0 )); then
-        echo "Failed during $phase. Azure RBAC conditions, deny assignments, policy or propagation may reject deployment." >&2
+        echo "Failed during $phase; remaining deployment steps were not run." >&2
         if "$created"; then
             echo "Inspect the NEW demo, then run scripts/cleanup.sh --confirm-delete with the same environment." >&2
         fi
@@ -56,14 +56,46 @@ on_exit() {
     exit "$status"
 }
 trap on_exit EXIT
+context="$(azc account show -o json)"
+subscription_id="$(jq -er '.id' <<<"$context")"
+tenant="$(jq -er '.tenantId' <<<"$context")"
+user="$(jq -er '.user.name' <<<"$context")"
+# Query only tenant metadata: never capture or print the access token.
+token_tenant="$(azc account get-access-token --resource https://management.azure.com/ --query tenant -o tsv)"
+[[ "$token_tenant" == "$tenant" ]] || { echo "Authenticated tenant does not match the selected subscription." >&2; exit 1; }
+active_context="$(az account show -o json --only-show-errors)"
+jq -e --arg tenant "$tenant" --arg user "$user" \
+    '.tenantId == $tenant and .user.name == $user' <<<"$active_context" >/dev/null || {
+    echo "Select the chosen subscription with az account set in THIS Linux terminal before continuing." >&2; exit 1;
+}
 group_exists="$(azc group exists --name "$RESOURCE_GROUP" -o tsv)"
 [[ "$group_exists" == false ]] || {
     echo "Refusing to reuse an existing resource group." >&2; exit 1;
 }
-subscription_id="$(azc account show --query id -o tsv)"
-permissions="$(azc rest --method get --url \
-    "https://management.azure.com/subscriptions/$subscription_id/providers/Microsoft.Authorization/permissions?api-version=2022-04-01" -o json)"
-jq -e '.value | type == "array"' <<<"$permissions" >/dev/null
+permission_endpoint="https://management.azure.com/subscriptions/$subscription_id/providers/Microsoft.Authorization/permissions"
+permission_url="$permission_endpoint?api-version=2022-04-01"
+permissions='[]'
+seen_urls=()
+while [[ -n "$permission_url" ]]; do
+    [[ "$permission_url" == "$permission_endpoint?"* ]] || {
+        echo "Permission pagination returned an unexpected scope/host; evidence is incomplete." >&2; exit 1;
+    }
+    for seen in "${seen_urls[@]}"; do
+        [[ "$seen" != "$permission_url" ]] || {
+            echo "Permission pagination repeated a page; evidence is incomplete." >&2; exit 1;
+        }
+    done
+    seen_urls+=("$permission_url")
+    page="$(azc rest --method get --url "$permission_url" -o json)"
+    jq -e '(.value | type == "array") and
+        all(.value[]; (.actions | type == "array") and (.notActions | type == "array") and
+            all(.actions[], .notActions[]; type == "string")) and
+        (.nextLink == null or (.nextLink | type == "string"))' <<<"$page" >/dev/null || {
+        echo "Unexpected permission response; evidence is incomplete." >&2; exit 1;
+    }
+    permissions="$(jq -c --argjson previous "$permissions" '$previous + .value' <<<"$page")"
+    permission_url="$(jq -r '.nextLink // empty' <<<"$page")"
+done
 action=microsoft.authorization/roleassignments/write
 can_assign=false
 while IFS= read -r entry; do
@@ -79,9 +111,9 @@ while IFS= read -r entry; do
         if [[ "$action" == ${pattern,,} ]]; then excluded=true; fi
     done < <(jq -r '.notActions[]?' <<<"$entry")
     if "$allowed" && ! "$excluded"; then can_assign=true; fi
-done < <(jq -c '.value[]' <<<"$permissions")
+done < <(jq -c '.[]' <<<"$permissions")
 if ! "$can_assign"; then
-    echo "Preflight: no advertised roleAssignments/write at the subscription parent. Contributor alone cannot attach ACR or grant cluster RBAC. Activate appropriately scoped RBAC/User Access Administrator (or equivalent). No resources created." >&2
+    echo "Preflight did not establish roleAssignments/write for this sample's NEW ACR/cluster assignments. This subscription-parent read is NOT a demonstrated Azure authorization denial or proof of permissions at every child scope. Verify the active identity, applicable scope/PIM and conditions before retrying. No resources created." >&2
     exit 1
 fi
 echo "Role-assignment permission is advertised; this does NOT prove conditional/deny/policy or future assignment success."
@@ -98,10 +130,7 @@ for feature in ManagedGatewayAPIPreview ApplicationLoadBalancerPreview; do
         echo "Required managed-add-on preview not Registered: $feature. Obtain scoped approval first." >&2; exit 1;
     }
 done
-tenant="$(azc account show --query tenantId -o tsv)"
-active_tenant="$(az account show --query tenantId -o tsv --only-show-errors)"
-[[ "$active_tenant" == "$tenant" ]] || { echo "Sign in to the chosen subscription's tenant first." >&2; exit 1; }
-# Graph identity reads have no --subscription option; tenant context was checked.
+# Graph identity reads have no --subscription option; tenant and user context were checked.
 principal="$(az ad signed-in-user show --query id -o tsv --only-show-errors)"
 [[ -n "$principal" ]] || { echo "Cannot identify the signed-in user for cluster RBAC." >&2; exit 1; }
 if "$preflight_only"; then

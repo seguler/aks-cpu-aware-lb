@@ -12,9 +12,15 @@ The execution identity had Contributor, without advertised
 groups were deleted and verified; no benchmark measurements were collected.
 The deployment script now checks that permission **before** billable creation,
 documents its limits, and supports policy-compliant Entra authentication.
-A subsequent environment was checked **read-only**: the needed role-assignment
-permission and one provider/preview registration were still missing, so no new
-billable deployment was attempted. The operational sample is now Bash/Linux-first.
+A subsequent environment was checked **read-only**, not deployed. The authenticated
+Windows caller's complete subscription-parent permission response did not advertise
+role-assignment writes; this is **not an observed deployment authorization denial**
+or proof about all child scopes. The native Linux CLI could not acquire a fresh
+token (`AADSTS700082`), so its active principal's permissions were not established.
+Provider/preview prerequisites also remained outstanding. No new billable deployment
+was attempted. The operational sample is now Bash/Linux-first; its preflight checks
+native authentication/context, follows permission pagination, and reports these
+limitations rather than equating a negative preflight with an Azure denial.
 
 Local unit/HTTP-harness tests use synthetic fixtures and are **not evidence of
 Azure gateway redistribution**. GitHub CI passed Go race tests, vet, Linux
